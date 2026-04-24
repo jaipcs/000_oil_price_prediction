@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 st.set_page_config(page_title="Crude Oil Forecast Dashboard", layout="wide")
 
 st.title("Crude Oil Price Forecasting Dashboard")
-st.write("Compare models, inspect data, and predict crude oil close price.")
+st.write("Compare models, inspect data, predict crude oil close price, and forecast future values.")
 
 # =========================
 # LOAD DATA
@@ -84,7 +84,10 @@ def get_metrics(y_true, y_pred):
     mae = mean_absolute_error(y_true, y_pred)
     mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
-    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+    y_true_safe = np.where(np.array(y_true) == 0, 1e-8, np.array(y_true))
+    mape = np.mean(np.abs((np.array(y_true) - np.array(y_pred)) / y_true_safe)) * 100
+
     r2 = r2_score(y_true, y_pred)
 
     return {
@@ -140,6 +143,14 @@ st.sidebar.header("Controls")
 selected_model = st.sidebar.selectbox(
     "Select model",
     ["Random Forest", "XGBoost"]
+)
+
+future_days = st.sidebar.slider(
+    "Future forecast days",
+    min_value=3,
+    max_value=30,
+    value=14,
+    step=1
 )
 
 show_raw_data = st.sidebar.checkbox("Show raw dataset", value=False)
@@ -267,7 +278,7 @@ if hasattr(model, "feature_importances_"):
     ax4.set_title(f"Feature Importance - {selected_model}")
     ax4.set_xlabel("Feature")
     ax4.set_ylabel("Importance")
-    plt.xticks(rotation=45)
+    ax4.tick_params(axis="x", rotation=45)
     st.pyplot(fig4)
 
     st.dataframe(importance_df)
@@ -300,6 +311,121 @@ input_array = np.array(input_values).reshape(1, -1)
 if st.button("Predict Close Price"):
     prediction = model.predict(input_array)[0]
     st.success(f"Predicted Close Price using {selected_model}: {prediction:.2f}")
+
+# =========================
+# FUTURE FORECASTING
+# =========================
+st.subheader("Future Close Price Forecast")
+
+st.write(
+    "This section recursively forecasts future Close prices using the selected model. "
+    "Lag features are updated after each predicted day."
+)
+
+def recursive_future_forecast(model, df_model, feature_cols, future_days):
+    last_known_date = df_model["Date"].iloc[-1]
+    last_close_values = list(df_model["Close"].tail(30).values)
+
+    future_predictions = []
+
+    for day in range(1, future_days + 1):
+        close_lag_1 = last_close_values[-1]
+        close_lag_3 = last_close_values[-3]
+        close_lag_7 = last_close_values[-7]
+        close_roll_mean_7 = np.mean(last_close_values[-7:])
+        volatility_7 = np.std(last_close_values[-7:])
+
+        input_features = pd.DataFrame([{
+            "Close_lag_1": close_lag_1,
+            "Close_lag_3": close_lag_3,
+            "Close_lag_7": close_lag_7,
+            "Close_roll_mean_7": close_roll_mean_7,
+            "Volatility_7": volatility_7
+        }])
+
+        input_features = input_features[feature_cols]
+
+        next_pred = model.predict(input_features)[0]
+        future_date = last_known_date + pd.Timedelta(days=day)
+
+        future_predictions.append({
+            "Date": future_date,
+            "Predicted_Close": next_pred
+        })
+
+        last_close_values.append(next_pred)
+
+    return pd.DataFrame(future_predictions)
+
+future_forecast_df = recursive_future_forecast(
+    model=model,
+    df_model=df_model,
+    feature_cols=feature_cols,
+    future_days=future_days
+)
+
+# uncertainty band using test error standard deviation
+recent_error_std = np.std(y_test.values - y_pred.values)
+
+future_forecast_df["Lower_Bound"] = (
+    future_forecast_df["Predicted_Close"] - 1.96 * recent_error_std
+)
+
+future_forecast_df["Upper_Bound"] = (
+    future_forecast_df["Predicted_Close"] + 1.96 * recent_error_std
+)
+
+st.dataframe(future_forecast_df)
+
+fig5, ax5 = plt.subplots(figsize=(12, 5))
+
+ax5.plot(
+    df_model["Date"].tail(90),
+    df_model["Close"].tail(90),
+    label="Historical Close",
+    linewidth=3
+)
+
+connection_dates = [
+    df_model["Date"].iloc[-1],
+    future_forecast_df["Date"].iloc[0]
+]
+
+connection_values = [
+    df_model["Close"].iloc[-1],
+    future_forecast_df["Predicted_Close"].iloc[0]
+]
+
+ax5.plot(
+    connection_dates,
+    connection_values,
+    linestyle="--",
+    linewidth=2,
+    label="Forecast Start"
+)
+
+ax5.plot(
+    future_forecast_df["Date"],
+    future_forecast_df["Predicted_Close"],
+    label="Future Forecast",
+    marker="o",
+    linewidth=3
+)
+
+ax5.fill_between(
+    future_forecast_df["Date"],
+    future_forecast_df["Lower_Bound"],
+    future_forecast_df["Upper_Bound"],
+    alpha=0.2,
+    label="Uncertainty Range"
+)
+
+ax5.set_title(f"Future Forecast using {selected_model}")
+ax5.set_xlabel("Date")
+ax5.set_ylabel("Close Price")
+ax5.legend()
+ax5.grid(True)
+st.pyplot(fig5)
 
 # =========================
 # LAST RECORD SECTION
