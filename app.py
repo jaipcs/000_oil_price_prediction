@@ -313,22 +313,41 @@ if st.button("Predict Close Price"):
     st.success(f"Predicted Close Price using {selected_model}: {prediction:.2f}")
 
 # =========================
-# FUTURE FORECASTING
+# FUTURE FORECASTING UNTIL CURRENT DATE + NEXT DAYS
 # =========================
 st.subheader("Future Close Price Forecast")
 
 st.write(
-    "This section recursively forecasts future Close prices using the selected model. "
-    "Lag features are updated after each predicted day."
+    "This section forecasts from the latest available dataset date up to the current date, "
+    "and then continues forecasting future days."
 )
 
-def recursive_future_forecast(model, df_model, feature_cols, future_days):
+extra_future_days = st.sidebar.slider(
+    "Extra future days after today",
+    min_value=3,
+    max_value=60,
+    value=14,
+    step=1
+)
+
+def recursive_future_forecast_until_today(model, df_model, feature_cols, extra_future_days):
+
     last_known_date = df_model["Date"].iloc[-1]
+    today_date = pd.Timestamp.today().normalize()
+
+    # if dataset already goes beyond today, forecast only extra future days
+    if last_known_date >= today_date:
+        total_days = extra_future_days
+    else:
+        days_until_today = (today_date - last_known_date).days
+        total_days = days_until_today + extra_future_days
+
     last_close_values = list(df_model["Close"].tail(30).values)
 
     future_predictions = []
 
-    for day in range(1, future_days + 1):
+    for day in range(1, total_days + 1):
+
         close_lag_1 = last_close_values[-1]
         close_lag_3 = last_close_values[-3]
         close_lag_7 = last_close_values[-7]
@@ -348,23 +367,29 @@ def recursive_future_forecast(model, df_model, feature_cols, future_days):
         next_pred = model.predict(input_features)[0]
         future_date = last_known_date + pd.Timedelta(days=day)
 
+        if future_date <= today_date:
+            forecast_type = "Forecast Until Today"
+        else:
+            forecast_type = "Future Forecast"
+
         future_predictions.append({
             "Date": future_date,
-            "Predicted_Close": next_pred
+            "Predicted_Close": next_pred,
+            "Forecast_Type": forecast_type
         })
 
         last_close_values.append(next_pred)
 
     return pd.DataFrame(future_predictions)
 
-future_forecast_df = recursive_future_forecast(
+future_forecast_df = recursive_future_forecast_until_today(
     model=model,
     df_model=df_model,
     feature_cols=feature_cols,
-    future_days=future_days
+    extra_future_days=extra_future_days
 )
 
-# uncertainty band using test error standard deviation
+# uncertainty band
 recent_error_std = np.std(y_test.values - y_pred.values)
 
 future_forecast_df["Lower_Bound"] = (
@@ -377,15 +402,19 @@ future_forecast_df["Upper_Bound"] = (
 
 st.dataframe(future_forecast_df)
 
-fig5, ax5 = plt.subplots(figsize=(12, 5))
+# =========================
+# FORECAST PLOT
+# =========================
+fig5, ax5 = plt.subplots(figsize=(14, 6))
 
 ax5.plot(
-    df_model["Date"].tail(90),
-    df_model["Close"].tail(90),
+    df_model["Date"].tail(120),
+    df_model["Close"].tail(120),
     label="Historical Close",
     linewidth=3
 )
 
+# connection from last actual to first forecast
 connection_dates = [
     df_model["Date"].iloc[-1],
     future_forecast_df["Date"].iloc[0]
@@ -404,13 +433,32 @@ ax5.plot(
     label="Forecast Start"
 )
 
-ax5.plot(
-    future_forecast_df["Date"],
-    future_forecast_df["Predicted_Close"],
-    label="Future Forecast",
-    marker="o",
-    linewidth=3
-)
+# split forecast types
+until_today_df = future_forecast_df[
+    future_forecast_df["Forecast_Type"] == "Forecast Until Today"
+]
+
+future_only_df = future_forecast_df[
+    future_forecast_df["Forecast_Type"] == "Future Forecast"
+]
+
+if len(until_today_df) > 0:
+    ax5.plot(
+        until_today_df["Date"],
+        until_today_df["Predicted_Close"],
+        label="Forecast Until Current Date",
+        marker="o",
+        linewidth=3
+    )
+
+if len(future_only_df) > 0:
+    ax5.plot(
+        future_only_df["Date"],
+        future_only_df["Predicted_Close"],
+        label="Forecast After Today",
+        marker="o",
+        linewidth=3
+    )
 
 ax5.fill_between(
     future_forecast_df["Date"],
@@ -420,11 +468,19 @@ ax5.fill_between(
     label="Uncertainty Range"
 )
 
-ax5.set_title(f"Future Forecast using {selected_model}")
+ax5.axvline(
+    pd.Timestamp.today().normalize(),
+    linestyle="--",
+    linewidth=2,
+    label="Today"
+)
+
+ax5.set_title(f"Forecast Until Current Date and Beyond using {selected_model}")
 ax5.set_xlabel("Date")
 ax5.set_ylabel("Close Price")
 ax5.legend()
 ax5.grid(True)
+
 st.pyplot(fig5)
 
 # =========================
