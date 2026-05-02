@@ -325,11 +325,6 @@ if st.button("Predict Close Price"):
 # =========================
 st.subheader("Future Close Price Forecast")
 
-st.write(
-    "This forecast uses recursive prediction with momentum and volatility adjustment "
-    "so the future line does not become flat."
-)
-
 def recursive_future_forecast_until_today(model, df_model, feature_cols, extra_future_days):
     last_known_date = df_model["Date"].iloc[-1]
     today_date = pd.Timestamp.today().normalize()
@@ -520,7 +515,6 @@ ax5.legend()
 ax5.grid(True)
 
 st.pyplot(fig5)
-
 
 # =========================
 # LATEST RECORD
