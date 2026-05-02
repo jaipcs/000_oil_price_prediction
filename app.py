@@ -35,10 +35,19 @@ def load_data():
             df = df.sort_values("Date").reset_index(drop=True)
             return df
 
-    st.error("CSV file not found. Upload crude_oil_final.csv to the repo.")
+    st.error("CSV file not found. Upload crude_oil_final.csv to your project folder.")
     st.stop()
 
 df = load_data()
+
+# =========================
+# EXTRA FEATURES
+# =========================
+df["Return_1"] = df["Close"].pct_change()
+df["Momentum_3"] = df["Close"] - df["Close"].shift(3)
+df["Momentum_7"] = df["Close"] - df["Close"].shift(7)
+df["Close_roll_mean_14"] = df["Close"].rolling(14).mean()
+df["Trend_7_14"] = df["Close_roll_mean_7"] - df["Close_roll_mean_14"]
 
 # =========================
 # FEATURE SET
@@ -50,13 +59,17 @@ feature_cols = [
     "Close_lag_3",
     "Close_lag_7",
     "Close_roll_mean_7",
-    "Volatility_7"
+    "Volatility_7",
+    "Return_1",
+    "Momentum_3",
+    "Momentum_7",
+    "Trend_7_14"
 ]
 
 feature_cols = [col for col in feature_cols if col in df.columns]
 
 if len(feature_cols) == 0:
-    st.error("Required feature columns were not found in the dataset.")
+    st.error("Required feature columns were not found.")
     st.stop()
 
 df_model = df[["Date", target_col] + feature_cols].dropna().copy()
@@ -78,7 +91,7 @@ y_test = test_df[target_col]
 dates_test = test_df["Date"]
 
 # =========================
-# METRICS FUNCTION
+# METRICS
 # =========================
 def get_metrics(y_true, y_pred):
     mae = mean_absolute_error(y_true, y_pred)
@@ -87,7 +100,6 @@ def get_metrics(y_true, y_pred):
 
     y_true_safe = np.where(np.array(y_true) == 0, 1e-8, np.array(y_true))
     mape = np.mean(np.abs((np.array(y_true) - np.array(y_pred)) / y_true_safe)) * 100
-
     r2 = r2_score(y_true, y_pred)
 
     return {
@@ -104,19 +116,20 @@ def get_metrics(y_true, y_pred):
 @st.cache_resource
 def train_models(X_train, y_train):
     rf_model = RandomForestRegressor(
-        n_estimators=300,
-        max_depth=10,
+        n_estimators=400,
+        max_depth=12,
         random_state=42
     )
     rf_model.fit(X_train, y_train)
 
     xgb_model = XGBRegressor(
-        n_estimators=300,
-        learning_rate=0.05,
+        n_estimators=500,
+        learning_rate=0.03,
         max_depth=5,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42
+        subsample=0.85,
+        colsample_bytree=0.85,
+        random_state=42,
+        objective="reg:squarederror"
     )
     xgb_model.fit(X_train, y_train)
 
@@ -145,10 +158,10 @@ selected_model = st.sidebar.selectbox(
     ["Random Forest", "XGBoost"]
 )
 
-future_days = st.sidebar.slider(
-    "Future forecast days",
+extra_future_days = st.sidebar.slider(
+    "Extra future days after today",
     min_value=3,
-    max_value=30,
+    max_value=60,
     value=14,
     step=1
 )
@@ -166,7 +179,7 @@ else:
     model_metrics = xgb_metrics
 
 # =========================
-# TOP SECTION
+# TOP METRICS
 # =========================
 col1, col2, col3 = st.columns(3)
 
@@ -194,7 +207,7 @@ if show_summary:
     st.dataframe(df_model.describe())
 
 # =========================
-# HISTORICAL CLOSE CHART
+# HISTORICAL CLOSE
 # =========================
 st.subheader("Historical Close Price")
 
@@ -207,14 +220,11 @@ ax1.grid(True)
 st.pyplot(fig1)
 
 # =========================
-# MODEL PERFORMANCE TABLE
+# MODEL PERFORMANCE
 # =========================
 st.subheader("Model Performance Comparison")
 st.dataframe(comparison_df)
 
-# =========================
-# CURRENT MODEL METRICS
-# =========================
 st.subheader(f"Selected Model: {selected_model}")
 
 m1, m2, m3, m4 = st.columns(4)
@@ -256,7 +266,7 @@ error_values = y_test.values - y_pred.values
 fig3, ax3 = plt.subplots(figsize=(12, 4))
 ax3.plot(dates_test, error_values, linewidth=2)
 ax3.axhline(0, linestyle="--")
-ax3.set_title(f"Prediction Error (Actual - Predicted) - {selected_model}")
+ax3.set_title(f"Prediction Error - {selected_model}")
 ax3.set_xlabel("Date")
 ax3.set_ylabel("Error")
 ax3.grid(True)
@@ -284,11 +294,9 @@ if hasattr(model, "feature_importances_"):
     st.dataframe(importance_df)
 
 # =========================
-# MANUAL PREDICTION SECTION
+# MANUAL PREDICTION
 # =========================
 st.subheader("Manual Prediction")
-
-st.write("Enter feature values to predict the next Close price.")
 
 input_values = []
 
@@ -306,36 +314,26 @@ for i, col in enumerate(feature_cols):
 
     input_values.append(val)
 
-input_array = np.array(input_values).reshape(1, -1)
+input_array = pd.DataFrame([input_values], columns=feature_cols)
 
 if st.button("Predict Close Price"):
     prediction = model.predict(input_array)[0]
     st.success(f"Predicted Close Price using {selected_model}: {prediction:.2f}")
 
 # =========================
-# FUTURE FORECASTING UNTIL CURRENT DATE + NEXT DAYS
+# FIXED FUTURE FORECAST FUNCTION
 # =========================
 st.subheader("Future Close Price Forecast")
 
 st.write(
-    "This section forecasts from the latest available dataset date up to the current date, "
-    "and then continues forecasting future days."
-)
-
-extra_future_days = st.sidebar.slider(
-    "Extra future days after today",
-    min_value=3,
-    max_value=60,
-    value=14,
-    step=1
+    "This forecast uses recursive prediction with momentum and volatility adjustment "
+    "so the future line does not become flat."
 )
 
 def recursive_future_forecast_until_today(model, df_model, feature_cols, extra_future_days):
-
     last_known_date = df_model["Date"].iloc[-1]
     today_date = pd.Timestamp.today().normalize()
 
-    # if dataset already goes beyond today, forecast only extra future days
     if last_known_date >= today_date:
         total_days = extra_future_days
     else:
@@ -346,25 +344,65 @@ def recursive_future_forecast_until_today(model, df_model, feature_cols, extra_f
 
     future_predictions = []
 
+    recent_returns = df_model["Close"].pct_change().dropna().tail(30)
+    avg_return = recent_returns.mean()
+    return_std = recent_returns.std()
+
+    np.random.seed(42)
+
     for day in range(1, total_days + 1):
 
         close_lag_1 = last_close_values[-1]
         close_lag_3 = last_close_values[-3]
         close_lag_7 = last_close_values[-7]
+
         close_roll_mean_7 = np.mean(last_close_values[-7:])
         volatility_7 = np.std(last_close_values[-7:])
 
-        input_features = pd.DataFrame([{
+        return_1 = (last_close_values[-1] - last_close_values[-2]) / last_close_values[-2]
+        momentum_3 = last_close_values[-1] - last_close_values[-3]
+        momentum_7 = last_close_values[-1] - last_close_values[-7]
+
+        close_roll_mean_14 = np.mean(last_close_values[-14:])
+        trend_7_14 = close_roll_mean_7 - close_roll_mean_14
+
+        feature_dict = {
             "Close_lag_1": close_lag_1,
             "Close_lag_3": close_lag_3,
             "Close_lag_7": close_lag_7,
             "Close_roll_mean_7": close_roll_mean_7,
-            "Volatility_7": volatility_7
-        }])
+            "Volatility_7": volatility_7,
+            "Return_1": return_1,
+            "Momentum_3": momentum_3,
+            "Momentum_7": momentum_7,
+            "Trend_7_14": trend_7_14
+        }
 
-        input_features = input_features[feature_cols]
+        input_features = pd.DataFrame([{col: feature_dict[col] for col in feature_cols}])
 
-        next_pred = model.predict(input_features)[0]
+        base_pred = model.predict(input_features)[0]
+
+        # =========================
+        # IMPORTANT FIX
+        # =========================
+        trend = last_close_values[-1] - last_close_values[-2]
+        noise = np.random.normal(0, max(volatility_7 * 0.25, 0.15))
+        return_noise = np.random.normal(avg_return, return_std)
+
+        next_pred = (
+            base_pred
+            + 0.35 * trend
+            + noise
+            + last_close_values[-1] * return_noise * 0.25
+        )
+
+        # prevent unrealistic jump
+        max_change = last_close_values[-1] * 0.04
+        lower_limit = last_close_values[-1] - max_change
+        upper_limit = last_close_values[-1] + max_change
+
+        next_pred = np.clip(next_pred, lower_limit, upper_limit)
+
         future_date = last_known_date + pd.Timedelta(days=day)
 
         if future_date <= today_date:
@@ -389,7 +427,9 @@ future_forecast_df = recursive_future_forecast_until_today(
     extra_future_days=extra_future_days
 )
 
-# uncertainty band
+# =========================
+# UNCERTAINTY RANGE
+# =========================
 recent_error_std = np.std(y_test.values - y_pred.values)
 
 future_forecast_df["Lower_Bound"] = (
@@ -414,7 +454,6 @@ ax5.plot(
     linewidth=3
 )
 
-# connection from last actual to first forecast
 connection_dates = [
     df_model["Date"].iloc[-1],
     future_forecast_df["Date"].iloc[0]
@@ -433,7 +472,6 @@ ax5.plot(
     label="Forecast Start"
 )
 
-# split forecast types
 until_today_df = future_forecast_df[
     future_forecast_df["Forecast_Type"] == "Forecast Until Today"
 ]
@@ -483,13 +521,11 @@ ax5.grid(True)
 
 st.pyplot(fig5)
 
+
 # =========================
-# LAST RECORD SECTION
+# LATEST RECORD
 # =========================
 st.subheader("Latest Available Record")
 st.dataframe(df_model.tail(1))
 
-# =========================
-# FOOTER
-# =========================
 st.caption("Built with Streamlit for crude oil price forecasting.")
